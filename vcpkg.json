@@ -1,0 +1,27 @@
+{
+  "name": "opc-serial-bridge",
+  "version": "1.0.0",
+  "builtin-baseline": "ed8445dd2a9ba44e0e3ace4e952b2e33130082d9",
+  "dependencies": [
+    "yaml-cpp",
+    "open62541pp",
+    "boost-system",
+    "boost-asio",
+    "boost-chrono",
+    "spdlog"
+  ],
+  "overrides": [
+    {
+      "name": "boost-system",
+      "version-string": "1.90.0"
+    },
+    {
+      "name": "boost-asio",
+      "version-string": "1.90.0"
+    },
+    {
+      "name": "boost-chrono",
+      "version-string": "1.90.0"
+    }
+  ]
+}
