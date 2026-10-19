@@ -45,6 +45,8 @@ public:
     // Колбэки чтения и записи вызываются ВСЕГДА — с результатом или с ошибкой.
     using ReadDone = std::function<void(std::optional<std::vector<opcua::Variant>>)>;
     using WriteDone = std::function<void(bool ok)>;
+    // Итог по каждому узлу в том же порядке; пустой — запрос не прошёл целиком (нет связи, тайм-аут).
+    using WriteEachDone = std::function<void(std::vector<bool> ok)>;
 
     OpcTransport(asio::io_context& ioc, OpcSettings settings);
     OpcTransport(asio::io_context& ioc, const std::string& endpoint);
@@ -69,6 +71,8 @@ public:
     void read_nodes(std::span<const opcua::NodeId> nodes, ReadDone done);
     void write_nodes(std::span<const opcua::NodeId> nodes, std::span<const opcua::Variant> values,
                      WriteDone done);
+    void write_nodes_each(std::span<const opcua::NodeId> nodes, std::span<const opcua::Variant> values,
+                          WriteEachDone done);
     void read_node(const opcua::NodeId& node_id, std::function<void(std::optional<opcua::Variant>)> done);
     void write_node(const opcua::NodeId& node_id, const opcua::Variant& value, WriteDone done);
 

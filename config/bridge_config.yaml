@@ -1,12 +1,11 @@
 
 opc_ua:
   endpoint: opc.tcp://192.168.163.158:4840
-  security_mode: none                # none | sign | sign_encrypt
-  username: ""                       # пусто — анонимный вход
-  # password_env: OPC_PASSWORD       # пароль — из переменной окружения, не из файла
+  security_mode: none
+  username: ""
   timeout_ms: 5000
-  publishing_interval_ms: 50         # подписка на cmdReady; сервер может поправить
-  lifetime_count: 600                # время жизни подписки = 600 × 50 мс = 30 с
+  publishing_interval_ms: 50
+  lifetime_count: 600               
   keep_alive_count: 20
 
   keep_alive_node: "ns=4;s=|var|Inovance-PLC.Application.gvlPnp.keepAlive"
@@ -16,6 +15,7 @@ opc_ua:
   deceleration_node: false           # true — в ПЛК есть control.deceleration (иначе торможение = ускорению)
   result_node: false                 # true — мост пишет итог команды в cmdResult (0 ок, 1 чтение, 2 отклонена, 3 нет ответа)
   online_node: false                 # true — мост пишет info.online: отвечает ли плата
+  max_nodes_per_request: 100         # лимит сервера на узлы в одном запросе (у AC810 около 100); пачка статусов делится по нему
 
 serial_defaults:                     # для всех портов; у порта и устройства можно переопределить
   baud_rate: 115200
@@ -23,10 +23,16 @@ serial_defaults:                     # для всех портов; у порт
   stop_bits: 1
   response_timeout_ms: 50            # ответ платы после конца запроса
   reopen_delay_ms: 2000              # порт пропал или не открылся — пробовать снова через столько
-  status_poll_ms: 100                # опрос GET_STATUS
+  status_poll_ms: 100                # круг опроса порта: GET_STATUS всем платам раз в столько.
+                                     # У отдельной платы можно задать свой период — округлится до целых кругов
+  poll_schedule: fixed               # fixed — круги ровно по сетке 0, 100, 200 мс…, команды их не сдвигают;
+                                     # after_reply — следующий круг через status_poll_ms после конца прошлого
   offline_after: 3                   # столько тайм-аутов подряд — плата offline
-  offline_poll_ms: 1000              # опрос платы, которая не отвечает
+  offline_poll_ms: 1000              # опрос платы, которая не отвечает (тоже в кругах, разные платы — в разных)
   status_refresh_ms: 1000            # статус в ПЛК пишется только при изменении, но не реже чем раз в столько
+  status_flush_ms: 0                 # 0 — статусы плат порта пишутся в ПЛК одной пачкой в конце каждого круга опроса;
+                                     # > 0 — пачкой по своему таймеру раз в столько. Ответ на команду — всегда сразу.
+                                     # poll_schedule и status_flush_ms можно задать и у отдельного порта
 
 ports:
   - index: 1                         # {port} в узлах ПЛК

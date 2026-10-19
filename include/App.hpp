@@ -4,6 +4,8 @@
 #include "DeviceChannel.hpp"
 #include "Heartbeat.hpp"
 #include "OpcTransport.hpp"
+#include "PortPoller.hpp"
+#include "PortPublisher.hpp"
 #include "PortWorker.hpp"
 
 #include <deque>
@@ -31,7 +33,9 @@ private:
     OpcTransport opc_;
     std::unique_ptr<Heartbeat> heartbeat_;
     std::deque<PortWorker> ports_;
+    std::deque<PortPublisher> publishers_;     // по одному на порт: статусы его плат → ПЛК пачками
     std::deque<DeviceChannel> devices_;
+    std::deque<PortPoller> pollers_;           // по одному на порт: круги опроса его плат
     asio::signal_set signals_{io_, SIGINT, SIGTERM};
     asio::steady_timer stats_timer_{io_};
     bool stopping_{false};

@@ -16,6 +16,8 @@ find_package(yaml-cpp CONFIG REQUIRED)
 add_library(bridge_core STATIC
         src/protocol.cpp
         src/PortWorker.cpp
+        src/PortPublisher.cpp
+        src/PortPoller.cpp
         src/OpcTransport.cpp
         src/Config.cpp
         src/DeviceNodes.cpp

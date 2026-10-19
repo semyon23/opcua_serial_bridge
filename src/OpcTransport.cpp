@@ -362,8 +362,16 @@ void OpcTransport::read_nodes(std::span<const opcua::NodeId> nodes, ReadDone don
 
 void OpcTransport::write_nodes(std::span<const opcua::NodeId> nodes, std::span<const opcua::Variant> values,
                                WriteDone done) {
+    write_nodes_each(nodes, values, [done = std::move(done)](std::vector<bool> results) {
+        const bool ok = !results.empty() && std::all_of(results.begin(), results.end(), [](bool r) { return r; });
+        call_user("write", done, ok);
+    });
+}
+
+void OpcTransport::write_nodes_each(std::span<const opcua::NodeId> nodes, std::span<const opcua::Variant> values,
+                                    WriteEachDone done) {
     if (!session_active_ || nodes.empty() || nodes.size() != values.size()) {
-        call_user("write", done, false);
+        call_user("write", done, std::vector<bool>{});
         return;
     }
     std::vector<opcua::WriteValue> items;
@@ -380,25 +388,23 @@ void OpcTransport::write_nodes(std::span<const opcua::NodeId> nodes, std::span<c
              names = std::vector<opcua::NodeId>(nodes.begin(), nodes.end())](opcua::WriteResponse& response) {
                 auto a = alive.lock();
                 if (!a || !*a) return;
-                bool ok = true;
                 const auto service = response.responseHeader().serviceResult();
-                if (service.isBad()) {
-                    spdlog::error("[{}] Write failed: {}", name_, service.name());
-                    ok = false;
-                }
                 auto results = response.results();
-                if (results.size() != names.size()) ok = false;
-                for (size_t i = 0; i < results.size() && i < names.size(); ++i) {
-                    if (!results[i].isGood()) {
-                        spdlog::error("[{}] Write {} failed: {}", name_, node_name(names[i]), results[i].name());
-                        ok = false;
-                    }
+                if (service.isBad() || results.size() != names.size()) {
+                    spdlog::error("[{}] Write failed: {}", name_, service.name());
+                    call_user("write", done, std::vector<bool>{});
+                    return;
                 }
-                call_user("write", done, ok);
+                std::vector<bool> ok(names.size());
+                for (size_t i = 0; i < names.size(); ++i) {
+                    ok[i] = results[i].isGood();
+                    if (!ok[i]) spdlog::error("[{}] Write {} failed: {}", name_, node_name(names[i]), results[i].name());
+                }
+                call_user("write", done, std::move(ok));
             });
     } catch (const std::exception& e) {
         spdlog::error("[{}] Write not sent: {}", name_, e.what());
-        call_user("write", done, false);
+        call_user("write", done, std::vector<bool>{});
     }
 }
 

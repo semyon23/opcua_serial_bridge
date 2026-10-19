@@ -24,15 +24,16 @@ const char* command_name(uint8_t cmd) {
 
 }  // namespace
 
-DeviceChannel::DeviceChannel(asio::io_context& io, OpcTransport& opc, PortWorker& port, DeviceNodes nodes,
-                             const DeviceConfig& config, const NodeOptions& options, std::string name)
+DeviceChannel::DeviceChannel(asio::io_context& io, OpcTransport& opc, PortWorker& port, PortPublisher& publisher,
+                             DeviceNodes nodes, const DeviceConfig& config, const NodeOptions& options,
+                             std::string name)
     : opc_(opc),
       port_(port),
+      publisher_(publisher),
       nodes_(std::move(nodes)),
       config_(config),
       options_(options),
       name_(std::move(name)),
-      poll_timer_(io),
       retry_timer_(io),
       recheck_timer_(io) {
     command_read_.push_back(nodes_.cmd_ready);
@@ -42,15 +43,10 @@ DeviceChannel::DeviceChannel(asio::io_context& io, OpcTransport& opc, PortWorker
 void DeviceChannel::start() {
     running_ = true;
     opc_.register_node(nodes_.cmd_ready, [this](const opcua::Variant& value) { on_cmd_ready(value); });
-    poll_timer_.expires_after(std::chrono::milliseconds(0));
-    poll_timer_.async_wait([this](boost::system::error_code ec) {
-        if (!ec) poll();
-    });
 }
 
 void DeviceChannel::stop() {
     running_ = false;
-    poll_timer_.cancel();
     retry_timer_.cancel();
     recheck_timer_.cancel();
 }
@@ -91,12 +87,16 @@ void DeviceChannel::on_cmd_ready(const opcua::Variant& value) {
         port_.submit(config_.address, command.cmd, proto::pack(command.data), Priority::Command,
                      [this](std::optional<Reply> reply) {
                          if (!running_) return;
-                         if (reply && accept_status(*reply)) {
-                             finish_command(CommandResult::Ok);
-                         } else {
+                         auto status = parse_status(reply);
+                         if (!status) {
                              spdlog::warn("[{}] no reply to the command", name_);
                              finish_command(CommandResult::NoReply);
+                             return;
                          }
+                         // cmdReady сбрасываем, когда ответ (новый transaction_id) уже в ПЛК
+                         publish_status(*status, true, [this](bool) {
+                             if (running_) finish_command(CommandResult::Ok);
+                         });
                      });
     });
 }
@@ -141,74 +141,50 @@ void DeviceChannel::schedule_recheck() {
 
 // ------------------------------------------------------------------ опрос статуса
 
-void DeviceChannel::schedule_poll() {
-    if (!running_) return;
-    poll_timer_.expires_after(online_ ? config_.poll.status_poll : config_.poll.offline_poll);
-    poll_timer_.async_wait([this](boost::system::error_code ec) {
-        if (!ec) poll();
-    });
+bool DeviceChannel::poll_due(uint64_t cycle, std::chrono::milliseconds cycle_period) const {
+    const auto interval = online_ ? config_.poll.status_poll : config_.poll.offline_poll;
+    const auto every = std::max<int64_t>(1, (interval.count() + cycle_period.count() / 2) / cycle_period.count());
+    return cycle % static_cast<uint64_t>(every) == 0;
 }
 
-void DeviceChannel::poll() {
-    if (!running_) return;
-    if (port_.poll_pending(config_.address)) {     // прошлый опрос ещё в очереди
-        schedule_poll();
+void DeviceChannel::poll(std::function<void()> done) {
+    if (!running_) {
+        done();
         return;
     }
-    port_.submit(config_.address, proto::GET_STATUS, {0}, Priority::Poll, [this](std::optional<Reply> reply) {
-        if (!running_) return;
-        on_poll_reply(std::move(reply));
-        schedule_poll();
-    });
+    port_.submit(config_.address, proto::GET_STATUS, {0}, Priority::Poll,
+                 [this, done = std::move(done)](std::optional<Reply> reply) {
+                     if (running_) on_poll_reply(std::move(reply));
+                     done();
+                 });
 }
 
 void DeviceChannel::on_poll_reply(std::optional<Reply> reply) {
-    if (reply && accept_status(*reply)) {
+    if (auto status = parse_status(reply)) {
         timeouts_in_row_ = 0;
         set_online(true);
+        publish_status(*status, false);
         return;
     }
     if (++timeouts_in_row_ >= config_.poll.offline_after) set_online(false);
 }
 
-bool DeviceChannel::accept_status(const Reply& reply) {
-    auto status = proto::unpack_status(reply.payload);
-    if (!status) {
-        spdlog::warn("[{}] reply with {} bytes instead of StatusData", name_, reply.payload.size());
-        return false;
-    }
-    // ответ на команду пишем всегда: ПЛК ждёт новый transaction_id
-    publish_status(*status, reply.cmd != proto::GET_STATUS);
-    return true;
+std::optional<proto::StatusData> DeviceChannel::parse_status(const std::optional<Reply>& reply) {
+    if (!reply) return std::nullopt;
+    auto status = proto::unpack_status(reply->payload);
+    if (!status) spdlog::warn("[{}] reply with {} bytes instead of StatusData", name_, reply->payload.size());
+    return status;
 }
 
-void DeviceChannel::publish_status(const proto::StatusData& status, bool force) {
+// urgent — ответ на команду: пишется всегда и сразу (ПЛК ждёт новый transaction_id).
+// Статус опроса — только если изменился, плюс раз в status_refresh, если ПЛК перезапускался.
+void DeviceChannel::publish_status(const proto::StatusData& status, bool urgent, PortPublisher::Sent sent) {
     const bool unchanged = last_published_ && *last_published_ == status;
     const bool fresh = Clock::now() - last_publish_time_ < config_.poll.status_refresh;
-    if (!force && unchanged && fresh) return;      // ничего нового — ПЛК не нагружаем
-    if (publish_in_flight_) {
-        pending_publish_ = status;                 // запишем, когда закончится текущая запись
-        return;
-    }
-    write_status(status);
-}
-
-void DeviceChannel::write_status(const proto::StatusData& status) {
-    publish_in_flight_ = true;
-    opc_.write_nodes(nodes_.status, encode_status(status), [this, status](bool ok) {
-        if (!running_) return;
-        publish_in_flight_ = false;
-        if (ok) {
-            last_published_ = status;
-            last_publish_time_ = Clock::now();
-            opc_.write_node(nodes_.info_ready, opcua::Variant(true), {});   // только после значений
-        }
-        if (pending_publish_) {
-            auto next = *pending_publish_;
-            pending_publish_.reset();
-            publish_status(next, false);
-        }
-    });
+    if (!urgent && unchanged && fresh) return;      // ничего нового — ПЛК не нагружаем
+    last_published_ = status;
+    last_publish_time_ = Clock::now();
+    publisher_.publish(nodes_, status, urgent, std::move(sent));
 }
 
 void DeviceChannel::set_online(bool online) {

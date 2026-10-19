@@ -73,6 +73,23 @@ milliseconds ms(const Node& parent, const std::string& key, milliseconds fallbac
 const std::set<std::string> kSerialKeys = {"baud_rate", "parity", "stop_bits", "response_timeout_ms",
                                            "reopen_delay_ms", "max_queue"};
 const std::set<std::string> kPollKeys = {"status_poll_ms", "offline_poll_ms", "offline_after", "status_refresh_ms"};
+// только у порта и в serial_defaults, не у платы: это свойства порта целиком
+const std::set<std::string> kPortKeys = {"status_flush_ms", "poll_schedule"};
+
+struct PortTiming {
+    PollSchedule schedule{PollSchedule::Fixed};
+    milliseconds flush{0};
+};
+
+void read_port_timing(const Node& n, PortTiming& t) {
+    if (n.has("poll_schedule")) {
+        const auto v = n.child("poll_schedule").as<std::string>();
+        if (v == "fixed") t.schedule = PollSchedule::Fixed;
+        else if (v == "after_reply") t.schedule = PollSchedule::AfterReply;
+        else n.child("poll_schedule").fail("fixed or after_reply");
+    }
+    t.flush = ms(n, "status_flush_ms", t.flush, 0, 10000);
+}
 
 void read_serial(const Node& n, PortSettings& s) {
     s.baud_rate = static_cast<unsigned>(ranged(n, "baud_rate", s.baud_rate, 300, 4000000));
@@ -106,7 +123,8 @@ void read_poll(const Node& n, PollSettings& p) {
 void read_opc(const Node& n, BridgeConfig& cfg) {
     n.expect_map({"endpoint", "security_mode", "username", "password_env", "timeout_ms", "publishing_interval_ms",
                   "sampling_interval_ms", "lifetime_count", "keep_alive_count", "keep_alive_node",
-                  "keep_alive_period_ms", "device_node_pattern", "deceleration_node", "result_node", "online_node"});
+                  "keep_alive_period_ms", "device_node_pattern", "deceleration_node", "result_node", "online_node",
+                  "max_nodes_per_request"});
     auto& o = cfg.opc;
     o.endpoint = required_string(n, "endpoint");
     if (o.endpoint.rfind("opc.tcp://", 0) != 0) n.child("endpoint").fail("must start with opc.tcp://");
@@ -132,6 +150,9 @@ void read_opc(const Node& n, BridgeConfig& cfg) {
     if (o.lifetime_count < 3 * o.max_keep_alive_count) {
         n.child("lifetime_count").fail("must be at least 3 x keep_alive_count (OPC UA rule)");
     }
+
+    cfg.max_nodes_per_request = static_cast<size_t>(
+        ranged(n, "max_nodes_per_request", static_cast<long long>(cfg.max_nodes_per_request), StatusNodeCount, 100000));
 
     cfg.keep_alive_node = get<std::string>(n, "keep_alive_node", "");
     cfg.keep_alive_period = ms(n, "keep_alive_period_ms", cfg.keep_alive_period, 100, 600000);
@@ -165,13 +186,16 @@ BridgeConfig read_config(const YAML::Node& root_node) {
 
     PortSettings serial_defaults;
     PollSettings poll_defaults;
+    PortTiming timing_defaults;
     if (root.has("serial_defaults")) {
         const auto d = root.child("serial_defaults");
         std::set<std::string> keys = kSerialKeys;
         keys.insert(kPollKeys.begin(), kPollKeys.end());
+        keys.insert(kPortKeys.begin(), kPortKeys.end());
         d.expect_map(keys);
         read_serial(d, serial_defaults);
         read_poll(d, poll_defaults);
+        read_port_timing(d, timing_defaults);
     }
 
     const auto ports = root.child("ports");
@@ -182,6 +206,7 @@ BridgeConfig read_config(const YAML::Node& root_node) {
         const auto pn = ports.item(i);
         std::set<std::string> keys = kSerialKeys;
         keys.insert(kPollKeys.begin(), kPollKeys.end());
+        keys.insert(kPortKeys.begin(), kPortKeys.end());
         keys.insert({"index", "path", "devices"});
         pn.expect_map(keys);
 
@@ -192,8 +217,13 @@ BridgeConfig read_config(const YAML::Node& root_node) {
         port.serial.path = required_string(pn, "path");
         if (!port_paths.insert(port.serial.path).second) pn.child("path").fail("the same port is listed twice");
         read_serial(pn, port.serial);
+        PortTiming timing = timing_defaults;
+        read_port_timing(pn, timing);
+        port.poll_schedule = timing.schedule;
+        port.status_flush = timing.flush;
         PollSettings port_poll = poll_defaults;
         read_poll(pn, port_poll);
+        port.poll_cycle = port_poll.status_poll;
 
         const auto devices = pn.child("devices");
         if (!devices.node.IsSequence() || devices.node.size() == 0) devices.fail("a non-empty list is required");
