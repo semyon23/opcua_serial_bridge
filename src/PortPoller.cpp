@@ -58,13 +58,15 @@ void PortPoller::tick() {
     for (size_t i = 0; i < devices_.size(); ++i) {
         if (devices_[i]->poll_due(cycle_ + i, period_)) due.push_back(devices_[i]);
     }
-    waiting_ = due.size();
+    waiting_ = polled_ = due.size();
+    answered_ = 0;
     if (due.empty()) {
         cycle_finished();
         return;
     }
     for (DeviceChannel* device : due) {
-        device->poll([this] {
+        device->poll([this](bool answered) {
+            if (answered) ++answered_;
             if (running_ && --waiting_ == 0) cycle_finished();
         });
     }
@@ -75,6 +77,14 @@ void PortPoller::cycle_finished() {
     const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - cycle_started_);
     stats_.max_cycle = std::max(stats_.max_cycle, took);
     if (took <= period_) overrun_logged_ = false;
+
+    if (polled_ >= 2 && answered_ == 0) {
+        if (!port_silent_) spdlog::warn("[{}] no device answered in a whole poll cycle: all devices offline", name_);
+        port_silent_ = true;
+        for (DeviceChannel* device : devices_) device->mark_offline();
+    } else if (answered_ > 0) {
+        port_silent_ = false;
+    }
 
     if (flush_after_cycle_) publisher_.flush();
     if (schedule_ == PollSchedule::AfterReply) wait_until(Clock::now() + period_);

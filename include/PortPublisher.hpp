@@ -12,7 +12,7 @@
 //
 // Плата отдаёт сюда свой статус (publish) и идёт дальше. Сборщик хранит по одному, последнему,
 // статусу на плату и отправляет всё накопленное (flush) двумя запросами:
-//   1) Write: info.* всех плат пачки;
+//   1) Write: info.* всех плат пачки и online = true тех, что сейчас отвечают;
 //   2) Write: infoReady = true тех плат, чьи значения записались.
 // Когда отправлять: flush_interval > 0 — по своему таймеру; 0 — flush() зовёт PortPoller в конце круга опроса.
 // Ответ на команду (urgent) уходит сразу, вместе со всем накопленным.
@@ -36,8 +36,11 @@ public:
     void start();
     void stop();
 
-    // nodes должны жить, пока жив сборщик: App хранит платы в deque, адреса не меняются.
-    void publish(const DeviceNodes& nodes, const proto::StatusData& status, bool urgent, Sent sent = {});
+    // nodes и online должны жить, пока жив сборщик: App хранит платы в deque, адреса не меняются.
+    // online — флаг платы «отвечает»: читается в момент отправки, чтобы не записать true
+    // поверх false, если плату успели признать отключённой, пока статус ждал в очереди.
+    void publish(const DeviceNodes& nodes, const bool& online, const proto::StatusData& status, bool urgent,
+                 Sent sent = {});
     void flush();       // отправить накопленное сейчас; если пачка ещё пишется — ничего не делает
 
     const std::string& name() const { return name_; }
@@ -46,6 +49,7 @@ public:
 private:
     struct Item {
         const DeviceNodes* nodes;
+        const bool* online;
         proto::StatusData status;
         bool urgent{false};
         std::vector<Sent> sent;

@@ -16,7 +16,7 @@
 class DeviceChannel {
 public:
     DeviceChannel(asio::io_context& io, OpcTransport& opc, PortWorker& port, PortPublisher& publisher,
-                  DeviceNodes nodes, const DeviceConfig& config, const NodeOptions& options, std::string name);
+                  DeviceNodes nodes, const DeviceConfig& config, std::string name);
     DeviceChannel(const DeviceChannel&) = delete;
     DeviceChannel& operator=(const DeviceChannel&) = delete;
 
@@ -30,16 +30,18 @@ public:
     // Пора ли в этом круге: у платы свой период (status_poll_ms, или offline_poll_ms, пока не отвечает),
     // округлённый до целого числа кругов.
     bool poll_due(uint64_t cycle, std::chrono::milliseconds cycle_period) const;
-    // GET_STATUS в очередь порта; done — когда опрос закончен: ответ или тайм-аут (вызывается всегда).
-    void poll(std::function<void()> done);
+    // GET_STATUS в очередь порта; done(ответила ли плата) — когда опрос закончен (вызывается всегда).
+    void poll(std::function<void(bool answered)> done);
+    // Весь порт молчит (PortPoller): плата offline сразу, не дожидаясь offline_after тайм-аутов.
+    void mark_offline();
 
 private:
     using Clock = std::chrono::steady_clock;
 
     void on_cmd_ready(const opcua::Variant& value);
-    void finish_command(CommandResult result);
+    void finish_command();
     void schedule_recheck();
-    void on_poll_reply(std::optional<Reply> reply);
+    bool on_poll_reply(std::optional<Reply> reply);
     std::optional<proto::StatusData> parse_status(const std::optional<Reply>& reply);
     void publish_status(const proto::StatusData& status, bool urgent, PortPublisher::Sent sent = {});
     void set_online(bool online);
@@ -49,7 +51,6 @@ private:
     PortPublisher& publisher_;
     DeviceNodes nodes_;
     DeviceConfig config_;
-    NodeOptions options_;
     std::string name_;                          // «port 1 / device 2» — для журнала
     asio::steady_timer retry_timer_;
     asio::steady_timer recheck_timer_;

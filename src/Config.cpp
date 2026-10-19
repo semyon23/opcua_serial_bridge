@@ -123,8 +123,7 @@ void read_poll(const Node& n, PollSettings& p) {
 void read_opc(const Node& n, BridgeConfig& cfg) {
     n.expect_map({"endpoint", "security_mode", "username", "password_env", "timeout_ms", "publishing_interval_ms",
                   "sampling_interval_ms", "lifetime_count", "keep_alive_count", "keep_alive_node",
-                  "keep_alive_period_ms", "device_node_pattern", "deceleration_node", "result_node", "online_node",
-                  "max_nodes_per_request"});
+                  "keep_alive_period_ms", "device_node_pattern", "max_nodes_per_request"});
     auto& o = cfg.opc;
     o.endpoint = required_string(n, "endpoint");
     if (o.endpoint.rfind("opc.tcp://", 0) != 0) n.child("endpoint").fail("must start with opc.tcp://");
@@ -164,15 +163,11 @@ void read_opc(const Node& n, BridgeConfig& cfg) {
         }
     }
 
-    auto& nodes = cfg.nodes;
-    nodes.device_pattern = required_string(n, "device_node_pattern");
-    if (nodes.device_pattern.find("{port}") == std::string::npos ||
-        nodes.device_pattern.find("{device}") == std::string::npos) {
+    auto& pattern = cfg.device_node_pattern;
+    pattern = required_string(n, "device_node_pattern");
+    if (pattern.find("{port}") == std::string::npos || pattern.find("{device}") == std::string::npos) {
         n.child("device_node_pattern").fail("must contain {port} and {device}");
     }
-    nodes.deceleration = get<bool>(n, "deceleration_node", false);
-    nodes.command_result = get<bool>(n, "result_node", false);
-    nodes.online = get<bool>(n, "online_node", false);
 }
 
 BridgeConfig read_config(const YAML::Node& root_node) {
@@ -243,7 +238,7 @@ BridgeConfig read_config(const YAML::Node& root_node) {
             dev.poll = port_poll;
             read_poll(dn, dev.poll);
             try {
-                (void)DeviceNodes::make(cfg.nodes, port.index, dev.index);   // все NodeId разбираются
+                (void)DeviceNodes::make(cfg.device_node_pattern, port.index, dev.index);   // все NodeId разбираются
             } catch (const std::exception& e) {
                 dn.fail(std::string("cannot build PLC node names: ") + e.what());
             }

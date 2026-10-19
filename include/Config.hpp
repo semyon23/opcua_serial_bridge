@@ -42,16 +42,9 @@ struct PortConfig {
     std::vector<DeviceConfig> devices;
 };
 
-struct NodeOptions {
-    std::string device_pattern;     // база узлов устройства: {port}, {device}
-    bool deceleration{false};       // в ПЛК есть control.deceleration (иначе торможение = ускорению)
-    bool command_result{false};     // мост пишет итог команды в cmdResult
-    bool online{false};             // мост пишет info.online: отвечает ли плата
-};
-
 struct BridgeConfig {
     OpcSettings opc;
-    NodeOptions nodes;
+    std::string device_node_pattern;        // база узлов устройства: {port}, {device}
     std::string keep_alive_node;
     std::chrono::milliseconds keep_alive_period{1000};
     size_t max_nodes_per_request{100};      // лимит сервера на узлы в одном Write; больше — пачка делится

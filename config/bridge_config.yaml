@@ -12,16 +12,13 @@ opc_ua:
   keep_alive_period_ms: 500
 
   device_node_pattern: "ns=4;s=|var|Inovance-PLC.Application.gvlPnp.ManipulatorPorts[{port}].Manipulator[{device}]"
-  deceleration_node: false           # true — в ПЛК есть control.deceleration (иначе торможение = ускорению)
-  result_node: false                 # true — мост пишет итог команды в cmdResult (0 ок, 1 чтение, 2 отклонена, 3 нет ответа)
-  online_node: false                 # true — мост пишет info.online: отвечает ли плата
   max_nodes_per_request: 100         # лимит сервера на узлы в одном запросе (у AC810 около 100); пачка статусов делится по нему
 
-serial_defaults:                     # для всех портов; у порта и устройства можно переопределить
+serial_defaults:
   baud_rate: 115200
-  parity: none                       # none | even | odd
+  parity: none
   stop_bits: 1
-  response_timeout_ms: 50            # ответ платы после конца запроса
+  response_timeout_ms: 20            # ответ платы после конца запроса (на 115200 он приходит за ~4 мс)
   reopen_delay_ms: 2000              # порт пропал или не открылся — пробовать снова через столько
   status_poll_ms: 100                # круг опроса порта: GET_STATUS всем платам раз в столько.
                                      # У отдельной платы можно задать свой период — округлится до целых кругов
@@ -35,7 +32,7 @@ serial_defaults:                     # для всех портов; у порт
                                      # poll_schedule и status_flush_ms можно задать и у отдельного порта
 
 ports:
-  - index: 1                         # {port} в узлах ПЛК
+  - index: 1
     path: /tmp/ttySim23 #/dev/ttyUSB0
     devices:
       - {address: 1}
@@ -61,8 +58,4 @@ ports:
       - {address: 8}
       - {address: 9}
       - {address: 10}
-#  - index: 2
-#     path: /dev/ttyUSB1
-#     devices:
-#       - {address: 1}
-      #- {address: 5, index: 2, status_poll_ms: 200}   # плата 5 → Manipulator[2]
+

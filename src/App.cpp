@@ -18,10 +18,9 @@ App::App(BridgeConfig config) : config_(std::move(config)), opc_(io_, config_.op
         PortPoller& poller = pollers_.emplace_back(io_, publisher, pc.poll_cycle, pc.poll_schedule,
                                                    pc.status_flush.count() == 0, port_name);
         for (const DeviceConfig& dc : pc.devices) {
-            auto nodes = DeviceNodes::make(config_.nodes, pc.index, dc.index);
+            auto nodes = DeviceNodes::make(config_.device_node_pattern, pc.index, dc.index);
             auto name = port_name + " / device " + std::to_string(dc.address);
-            poller.add(devices_.emplace_back(io_, opc_, port, publisher, std::move(nodes), dc, config_.nodes,
-                                             std::move(name)));
+            poller.add(devices_.emplace_back(io_, opc_, port, publisher, std::move(nodes), dc, std::move(name)));
         }
     }
 }

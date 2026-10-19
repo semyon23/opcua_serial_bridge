@@ -1,5 +1,4 @@
 #include "../include/DeviceNodes.hpp"
-#include "../include/Config.hpp"
 
 #include <cmath>
 #include <limits>
@@ -56,14 +55,13 @@ bool fits_float(double x) {
 
 }  // namespace
 
-DeviceNodes DeviceNodes::make(const NodeOptions& options, uint16_t port_index, uint16_t device_index) {
+DeviceNodes DeviceNodes::make(const std::string& pattern, uint16_t port_index, uint16_t device_index) {
     DeviceNodes n;
-    n.base = replace_all(replace_all(options.device_pattern, "{port}", std::to_string(port_index)), "{device}",
+    n.base = replace_all(replace_all(pattern, "{port}", std::to_string(port_index)), "{device}",
                          std::to_string(device_index));
     n.cmd_ready = node(n.base, ".cmdReady");
     n.info_ready = node(n.base, ".infoReady");
-    if (options.command_result) n.cmd_result = node(n.base, ".cmdResult");
-    if (options.online) n.online = node(n.base, ".info.online");
+    n.online = node(n.base, ".online");
 
     n.control = {
         node(n.base, ".control.command"),
@@ -75,7 +73,6 @@ DeviceNodes DeviceNodes::make(const NodeOptions& options, uint16_t port_index, u
         node(n.base, ".control.acceleration"),
         node(n.base, ".control.direction"),
     };
-    if (options.deceleration) n.control.push_back(node(n.base, ".control.deceleration"));
 
     n.status = {
         node(n.base, ".info.transaction_id"),
@@ -90,9 +87,8 @@ DeviceNodes DeviceNodes::make(const NodeOptions& options, uint16_t port_index, u
     return n;
 }
 
-std::variant<PlcCommand, std::string> decode_command(std::span<const opcua::Variant> values, bool has_deceleration) {
-    const size_t expected = has_deceleration ? CtrlDeceleration + 1 : CtrlDeceleration;
-    if (values.size() != expected) return "expected " + std::to_string(expected) + " control values";
+std::variant<PlcCommand, std::string> decode_command(std::span<const opcua::Variant> values) {
+    if (values.size() != ControlNodeCount) return "expected " + std::to_string(ControlNodeCount) + " control values";
 
     auto integer = [&](ControlNode i, const char* name, int lo, int hi) -> std::variant<int, std::string> {
         auto x = number(values[i]);
@@ -144,12 +140,7 @@ std::variant<PlcCommand, std::string> decode_command(std::span<const opcua::Vari
     if (auto* e = std::get_if<std::string>(&acceleration)) return *e;
     out.data.velocity = std::get<float>(velocity);
     out.data.acceleration = std::get<float>(acceleration);
-    out.data.deceleration = out.data.acceleration;        // как в текущем мосте, если узла торможения нет
-    if (has_deceleration) {
-        auto deceleration = real(CtrlDeceleration, "deceleration");
-        if (auto* e = std::get_if<std::string>(&deceleration)) return *e;
-        out.data.deceleration = std::get<float>(deceleration);
-    }
+    out.data.deceleration = out.data.acceleration;        // узла торможения в ПЛК нет
 
     auto direction = numbers(values[CtrlDirection]);
     if (!direction || direction->size() < proto::AXIS_COUNT) return "control.direction: an array of 3 numbers is required";

@@ -25,14 +25,12 @@ const char* command_name(uint8_t cmd) {
 }  // namespace
 
 DeviceChannel::DeviceChannel(asio::io_context& io, OpcTransport& opc, PortWorker& port, PortPublisher& publisher,
-                             DeviceNodes nodes, const DeviceConfig& config, const NodeOptions& options,
-                             std::string name)
+                             DeviceNodes nodes, const DeviceConfig& config, std::string name)
     : opc_(opc),
       port_(port),
       publisher_(publisher),
       nodes_(std::move(nodes)),
       config_(config),
-      options_(options),
       name_(std::move(name)),
       retry_timer_(io),
       recheck_timer_(io) {
@@ -63,7 +61,7 @@ void DeviceChannel::on_cmd_ready(const opcua::Variant& value) {
         if (!running_) return;
         if (!values) {
             spdlog::error("[{}] cannot read control nodes", name_);
-            finish_command(CommandResult::ReadFailed);
+            finish_command();
             return;
         }
         const auto& ready = values->front();
@@ -71,10 +69,10 @@ void DeviceChannel::on_cmd_ready(const opcua::Variant& value) {
             command_busy_ = false;          // устаревшее уведомление: команду уже закрыли
             return;
         }
-        auto decoded = decode_command(std::span(*values).subspan(1), options_.deceleration);
+        auto decoded = decode_command(std::span(*values).subspan(1));
         if (auto* error = std::get_if<std::string>(&decoded)) {
             spdlog::error("[{}] command rejected: {}", name_, *error);
-            finish_command(CommandResult::Rejected);
+            finish_command();
             return;
         }
         const auto command = std::get<PlcCommand>(decoded);
@@ -90,40 +88,32 @@ void DeviceChannel::on_cmd_ready(const opcua::Variant& value) {
                          auto status = parse_status(reply);
                          if (!status) {
                              spdlog::warn("[{}] no reply to the command", name_);
-                             finish_command(CommandResult::NoReply);
+                             finish_command();
                              return;
                          }
                          // cmdReady сбрасываем, когда ответ (новый transaction_id) уже в ПЛК
                          publish_status(*status, true, [this](bool) {
-                             if (running_) finish_command(CommandResult::Ok);
+                             if (running_) finish_command();
                          });
                      });
     });
 }
 
-void DeviceChannel::finish_command(CommandResult result) {
-    // cmdResult — отдельным запросом и раньше cmdReady: ПЛК читает итог, увидев cmdReady = false
-    auto reset_ready = [this, result] {
-        opc_.write_node(nodes_.cmd_ready, opcua::Variant(false), [this, result](bool ok) {
-            if (!running_) return;
-            if (ok) {
-                command_busy_ = false;
-                schedule_recheck();
-                return;
-            }
-            // не записалось (нет связи, ошибка ПЛК) — повторять, иначе cmdReady останется true навсегда
-            retry_timer_.expires_after(kRetryDelay);
-            retry_timer_.async_wait([this, result](boost::system::error_code ec) {
-                if (!ec && running_) finish_command(result);
-            });
+// cmdReady = false — всегда, даже если команда отклонена или плата не ответила.
+void DeviceChannel::finish_command() {
+    opc_.write_node(nodes_.cmd_ready, opcua::Variant(false), [this](bool ok) {
+        if (!running_) return;
+        if (ok) {
+            command_busy_ = false;
+            schedule_recheck();
+            return;
+        }
+        // не записалось (нет связи, ошибка ПЛК) — повторять, иначе cmdReady останется true навсегда
+        retry_timer_.expires_after(kRetryDelay);
+        retry_timer_.async_wait([this](boost::system::error_code ec) {
+            if (!ec && running_) finish_command();
         });
-    };
-    if (!nodes_.cmd_result) {
-        reset_ready();
-        return;
-    }
-    opc_.write_node(*nodes_.cmd_result, opcua::Variant(static_cast<uint8_t>(result)),
-                    [reset_ready](bool) { reset_ready(); });
+    });
 }
 
 // Если ПЛК поднял cmdReady быстрее, чем сервер опрашивает значение (true → false → true за один
@@ -147,26 +137,33 @@ bool DeviceChannel::poll_due(uint64_t cycle, std::chrono::milliseconds cycle_per
     return cycle % static_cast<uint64_t>(every) == 0;
 }
 
-void DeviceChannel::poll(std::function<void()> done) {
+void DeviceChannel::poll(std::function<void(bool answered)> done) {
     if (!running_) {
-        done();
+        done(false);
         return;
     }
     port_.submit(config_.address, proto::GET_STATUS, {0}, Priority::Poll,
                  [this, done = std::move(done)](std::optional<Reply> reply) {
-                     if (running_) on_poll_reply(std::move(reply));
-                     done();
+                     const bool answered = running_ && on_poll_reply(std::move(reply));
+                     done(answered);
                  });
 }
 
-void DeviceChannel::on_poll_reply(std::optional<Reply> reply) {
+bool DeviceChannel::on_poll_reply(std::optional<Reply> reply) {
     if (auto status = parse_status(reply)) {
         timeouts_in_row_ = 0;
         set_online(true);
         publish_status(*status, false);
-        return;
+        return true;
     }
     if (++timeouts_in_row_ >= config_.poll.offline_after) set_online(false);
+    return false;
+}
+
+void DeviceChannel::mark_offline() {
+    if (!running_ || !online_) return;
+    timeouts_in_row_ = config_.poll.offline_after;
+    set_online(false);
 }
 
 std::optional<proto::StatusData> DeviceChannel::parse_status(const std::optional<Reply>& reply) {
@@ -184,9 +181,11 @@ void DeviceChannel::publish_status(const proto::StatusData& status, bool urgent,
     if (!urgent && unchanged && fresh) return;      // ничего нового — ПЛК не нагружаем
     last_published_ = status;
     last_publish_time_ = Clock::now();
-    publisher_.publish(nodes_, status, urgent, std::move(sent));
+    publisher_.publish(nodes_, online_, status, urgent, std::move(sent));
 }
 
+// online меняется сразу, отдельной записью: false — после offline_after опросов без ответа,
+// true — на первом ответе. Пока плата отвечает, true ещё и подтверждается в каждой пачке статуса.
 void DeviceChannel::set_online(bool online) {
     if (online == online_ && online_published_) return;
     if (online != online_) {
@@ -194,11 +193,7 @@ void DeviceChannel::set_online(bool online) {
         else spdlog::warn("[{}] device offline: {} polls without reply", name_, timeouts_in_row_);
     }
     online_ = online;
-    if (!nodes_.online) {
-        online_published_ = true;
-        return;
-    }
-    opc_.write_node(*nodes_.online, opcua::Variant(online), [this, online](bool ok) {
+    opc_.write_node(nodes_.online, opcua::Variant(online), [this, online](bool ok) {
         if (running_ && ok && online == online_) online_published_ = true;
     });
 }

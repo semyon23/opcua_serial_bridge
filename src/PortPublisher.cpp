@@ -9,7 +9,7 @@ PortPublisher::PortPublisher(asio::io_context& io, OpcTransport& opc, std::chron
     : opc_(opc),
       timer_(io),
       flush_interval_(flush_interval),
-      max_devices_per_batch_(std::max<size_t>(1, max_nodes_per_request / StatusNodeCount)),
+      max_devices_per_batch_(std::max<size_t>(1, max_nodes_per_request / (StatusNodeCount + 1))),  // + online
       name_(std::move(name)) {}
 
 void PortPublisher::start() {
@@ -23,14 +23,15 @@ void PortPublisher::stop() {
     pending_.clear();
 }
 
-void PortPublisher::publish(const DeviceNodes& nodes, const proto::StatusData& status, bool urgent, Sent sent) {
+void PortPublisher::publish(const DeviceNodes& nodes, const bool& online, const proto::StatusData& status,
+                            bool urgent, Sent sent) {
     if (!running_) {
         if (sent) sent(false);
         return;
     }
     auto it = std::find_if(pending_.begin(), pending_.end(), [&](const Item& i) { return i.nodes == &nodes; });
     if (it == pending_.end()) {
-        it = pending_.insert(pending_.end(), Item{&nodes, status, urgent, {}});
+        it = pending_.insert(pending_.end(), Item{&nodes, &online, status, urgent, {}});
     } else {
         it->status = status;            // в ПЛК нужен только последний статус
         it->urgent = it->urgent || urgent;
@@ -61,16 +62,23 @@ void PortPublisher::flush() {
 
     std::vector<opcua::NodeId> nodes;
     std::vector<opcua::Variant> values;
+    std::vector<size_t> first;          // где в запросе начинаются узлы каждой платы
     for (const Item& item : batch) {
+        first.push_back(nodes.size());
         auto v = encode_status(item.status);
         nodes.insert(nodes.end(), item.nodes->status.begin(), item.nodes->status.end());
         values.insert(values.end(), v.begin(), v.end());
+        // online = true подтверждается с каждым статусом: ПЛК мог перезапуститься и сбросить его
+        if (*item.online) {
+            nodes.push_back(item.nodes->online);
+            values.emplace_back(true);
+        }
     }
 
     in_flight_ = true;
     ++stats_.batches;
     stats_.statuses += batch.size();
-    opc_.write_nodes_each(nodes, values, [this, batch = std::move(batch)](std::vector<bool> ok) mutable {
+    opc_.write_nodes_each(nodes, values, [this, batch = std::move(batch), first](std::vector<bool> ok) mutable {
         if (!running_) return;
         if (ok.empty()) {                                   // запрос не прошёл целиком — повторить позже
             ++stats_.failed;
@@ -78,11 +86,12 @@ void PortPublisher::flush() {
             in_flight_ = false;
             return;
         }
-        // плата записана, если записались все её узлы; ошибку узла транспорт уже написал в журнал
+        // плата записана, если записались все её узлы info.*; ошибку узла транспорт уже написал в журнал.
+        // online сюда не входит: без него статус всё равно годен
         std::vector<Item> written;
         for (size_t i = 0; i < batch.size(); ++i) {
-            const auto first = ok.begin() + static_cast<long>(i * StatusNodeCount);
-            if (std::all_of(first, first + StatusNodeCount, [](bool r) { return r; })) {
+            const auto from = ok.begin() + static_cast<long>(first[i]);
+            if (std::all_of(from, from + StatusNodeCount, [](bool r) { return r; })) {
                 written.push_back(std::move(batch[i]));
             } else {
                 for (auto& sent : batch[i].sent) sent(false);
