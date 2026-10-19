@@ -36,11 +36,13 @@ struct OpcSettings {
         std::chrono::seconds(1), std::chrono::seconds(2), std::chrono::seconds(5), std::chrono::seconds(10)};
 };
 
-
+// OPC UA-клиент поверх io_context. Всё — в потоке, который крутит io_context:
+// методы вызывать только из него, колбэки тоже приходят в нём.
+// Объект должен жить, пока работает io_context.
 class OpcTransport {
 public:
     using DataChangeCallback = std::function<void(const opcua::Variant&)>;
-
+    // Колбэки чтения и записи вызываются ВСЕГДА — с результатом или с ошибкой.
     using ReadDone = std::function<void(std::optional<std::vector<opcua::Variant>>)>;
     using WriteDone = std::function<void(bool ok)>;
 
@@ -55,29 +57,36 @@ public:
     void stop();
     bool session_active() const;
 
+    // За сколько сервер гарантированно заметит изменение значения: max(выборка, публикация),
+    // как он их выставил. Два изменения быстрее этого (true → false → true) он может не заметить.
+    std::chrono::milliseconds change_detection_time() const;
+
     // Узлы для подписки. Регистрировать до run(); после переподключения подписка
     // создаётся заново, и сервер снова присылает текущие значения.
     void register_node(const opcua::NodeId& node_id, DataChangeCallback callback);
 
     // Один запрос Read / Write на все узлы.
     void read_nodes(std::span<const opcua::NodeId> nodes, ReadDone done);
-    void write_nodes(std::span<const opcua::NodeId> nodes, std::span<const opcua::Variant> values,WriteDone done);
+    void write_nodes(std::span<const opcua::NodeId> nodes, std::span<const opcua::Variant> values,
+                     WriteDone done);
     void read_node(const opcua::NodeId& node_id, std::function<void(std::optional<opcua::Variant>)> done);
     void write_node(const opcua::NodeId& node_id, const opcua::Variant& value, WriteDone done);
 
     // Старые методы — чтобы текущий OpcSerialBridge собрался без правок.
     // Колбэк, как и раньше, только при успехе; новый код пусть использует read_nodes / write_nodes.
-    void read_from_node(const opcua::NodeId& node_id, std::function<void(const opcua::NodeId&, opcua::Variant)> on_complete);
+    void read_from_node(const opcua::NodeId& node_id,
+                        std::function<void(const opcua::NodeId&, opcua::Variant)> on_complete);
     void write_to_node(const opcua::NodeId& node_id, const opcua::Variant& value,
                        std::function<void()> on_complete);
 
 private:
-    asio::awaitable<void> run_loop();
     void configure_client();
     void connect();
     void on_session_activated();
     void on_connection_lost(std::string_view reason);
     void schedule_reconnect();
+    asio::awaitable<void> run_loop();
+
     void create_subscription();
     void schedule_subscription_retry(std::chrono::milliseconds delay);
     void on_subscription_created(opcua::CreateSubscriptionResponse& response);
@@ -98,6 +107,8 @@ private:
     std::optional<opcua::IntegerId> subscription_id_;
     bool subscription_pending_{false};
     uint64_t subscription_generation_{0};     // ответы на старые запросы подписки отбрасываем
+    double revised_publishing_ms_{0};
+    double revised_sampling_ms_{0};
 
     // Отложенные обработчики (post, таймеры) проверяют его: объект мог быть уже удалён.
     std::shared_ptr<bool> alive_{std::make_shared<bool>(true)};

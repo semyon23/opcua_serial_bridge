@@ -3,6 +3,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 
 namespace {
@@ -48,8 +49,12 @@ void OpcTransport::configure_client() {
     config.setTimeout(settings_.request_timeout_ms);
     config.setSecurityMode(settings_.security_mode);
     if (!settings_.username.empty()) {
+        // В режиме None пароль идёт открытым текстом — сервер может отказать (BadIdentityTokenRejected)
         config.setUserIdentityToken(opcua::UserNameIdentityToken(settings_.username, settings_.password));
     }
+
+    // Колбэки состояния приходят изнутри runIterate(); работу с клиентом откладываем
+    // до выхода из него через post, чтобы не вызывать службы рекурсивно.
     client_.onConnected([this] {
         spdlog::info("[{}] Connected to {}", name_, settings_.endpoint);
     });
@@ -95,7 +100,7 @@ void OpcTransport::stop() {
     reconnect_timer_.cancel();
     subscription_timer_.cancel();
     try {
-        client_.disconnect();
+        client_.disconnect();       // CloseSession: ждёт ответа не дольше request_timeout_ms
     } catch (const std::exception& e) {
         spdlog::warn("[{}] Disconnect: {}", name_, e.what());
     }
@@ -103,6 +108,11 @@ void OpcTransport::stop() {
 
 bool OpcTransport::session_active() const {
     return session_active_;
+}
+
+std::chrono::milliseconds OpcTransport::change_detection_time() const {
+    const double interval = std::max({revised_publishing_ms_, revised_sampling_ms_, settings_.publishing_interval_ms});
+    return std::chrono::milliseconds(static_cast<long long>(std::ceil(interval)));
 }
 
 void OpcTransport::connect() {
@@ -132,7 +142,7 @@ void OpcTransport::on_connection_lost(std::string_view reason) {
     subscription_pending_ = false;
     ++subscription_generation_;          // ответы на запросы старой подписки больше не нужны
     subscription_timer_.cancel();
-    if (reconnect_pending_) return;
+    if (reconnect_pending_) return;      // переподключение уже запланировано — не спамим журнал
     spdlog::warn("[{}] Connection lost: {}", name_, reason);
     schedule_reconnect();
 }
@@ -159,6 +169,7 @@ asio::awaitable<void> OpcTransport::run_loop() {
         } catch (const opcua::BadStatus& e) {
             on_connection_lost(e.what());
         } catch (const std::exception& e) {
+            // сюда попадают исключения из колбэков open62541pp — соединение тут ни при чём
             spdlog::error("[{}] runIterate: {}", name_, e.what());
         }
         const auto spent = std::chrono::steady_clock::now() - started;
@@ -245,6 +256,8 @@ void OpcTransport::on_subscription_created(opcua::CreateSubscriptionResponse& re
         return;
     }
     subscription_id_ = response.subscriptionId();
+    revised_publishing_ms_ = response.revisedPublishingInterval();
+    revised_sampling_ms_ = 0;
     spdlog::info("[{}] Subscription {}: publishing {} ms, lifetime {} cycles, keep-alive {} cycles",
                  name_, response.subscriptionId(), response.revisedPublishingInterval(),
                  response.revisedLifetimeCount(), response.revisedMaxKeepAliveCount());
@@ -276,10 +289,12 @@ void OpcTransport::on_subscription_created(opcua::CreateSubscriptionResponse& re
                 [this, alive, node, generation](opcua::MonitoredItemCreateResult& result) {
                     auto a = alive.lock();
                     if (!a || !*a || generation != subscription_generation_) return;
-                    spdlog::debug("[{}] Monitored {} as mon {}: {}", name_, node_name(node),
-                                  result.monitoredItemId(), result.statusCode().name());
+                    spdlog::debug("[{}] Monitored {} as mon {}: {}, sampling {} ms", name_, node_name(node),
+                                  result.monitoredItemId(), result.statusCode().name(),
+                                  result.revisedSamplingInterval());
+                    revised_sampling_ms_ = std::max(revised_sampling_ms_, result.revisedSamplingInterval());
                     if (result.statusCode().isBad()) {
-
+                        // например, узла нет в ПЛК: без него команды с этого устройства не дойдут
                         spdlog::error("[{}] Monitor {} failed: {}", name_, node_name(node),
                                       result.statusCode().name());
                         schedule_subscription_retry(std::chrono::seconds(5));
@@ -303,6 +318,8 @@ void OpcTransport::schedule_subscription_retry(std::chrono::milliseconds delay) 
     });
 }
 
+// ------------------------------------------------------------------ чтение и запись
+
 void OpcTransport::read_nodes(std::span<const opcua::NodeId> nodes, ReadDone done) {
     if (!session_active_ || nodes.empty()) {
         call_user("read", done, std::nullopt);
@@ -317,7 +334,7 @@ void OpcTransport::read_nodes(std::span<const opcua::NodeId> nodes, ReadDone don
             client_, items, opcua::TimestampsToReturn::Neither,
             [this, alive = std::weak_ptr<bool>(alive_), done, count = nodes.size()](opcua::ReadResponse& response) {
                 auto a = alive.lock();
-                if (!a || !*a) return;
+                if (!a || !*a) return;         // закрываемся — объекты моста уже могут быть удалены
                 const auto service = response.responseHeader().serviceResult();
                 auto results = response.results();
                 if (service.isBad() || results.size() != count) {
@@ -352,6 +369,7 @@ void OpcTransport::write_nodes(std::span<const opcua::NodeId> nodes, std::span<c
     std::vector<opcua::WriteValue> items;
     items.reserve(nodes.size());
     for (size_t i = 0; i < nodes.size(); ++i) {
+        // только значение, без меток времени: часть ПЛК отклоняет запись с ними (BadWriteNotSupported)
         items.emplace_back(nodes[i], opcua::AttributeId::Value, std::string_view{}, opcua::DataValue(values[i]));
     }
 

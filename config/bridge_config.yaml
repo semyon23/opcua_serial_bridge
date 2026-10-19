@@ -1,0 +1,62 @@
+
+opc_ua:
+  endpoint: opc.tcp://192.168.163.158:4840
+  security_mode: none                # none | sign | sign_encrypt
+  username: ""                       # пусто — анонимный вход
+  # password_env: OPC_PASSWORD       # пароль — из переменной окружения, не из файла
+  timeout_ms: 5000
+  publishing_interval_ms: 50         # подписка на cmdReady; сервер может поправить
+  lifetime_count: 600                # время жизни подписки = 600 × 50 мс = 30 с
+  keep_alive_count: 20
+
+  keep_alive_node: "ns=4;s=|var|Inovance-PLC.Application.gvlPnp.keepAlive"
+  keep_alive_period_ms: 500
+
+  device_node_pattern: "ns=4;s=|var|Inovance-PLC.Application.gvlPnp.ManipulatorPorts[{port}].Manipulator[{device}]"
+  deceleration_node: false           # true — в ПЛК есть control.deceleration (иначе торможение = ускорению)
+  result_node: false                 # true — мост пишет итог команды в cmdResult (0 ок, 1 чтение, 2 отклонена, 3 нет ответа)
+  online_node: false                 # true — мост пишет info.online: отвечает ли плата
+
+serial_defaults:                     # для всех портов; у порта и устройства можно переопределить
+  baud_rate: 115200
+  parity: none                       # none | even | odd
+  stop_bits: 1
+  response_timeout_ms: 50            # ответ платы после конца запроса
+  reopen_delay_ms: 2000              # порт пропал или не открылся — пробовать снова через столько
+  status_poll_ms: 100                # опрос GET_STATUS
+  offline_after: 3                   # столько тайм-аутов подряд — плата offline
+  offline_poll_ms: 1000              # опрос платы, которая не отвечает
+  status_refresh_ms: 1000            # статус в ПЛК пишется только при изменении, но не реже чем раз в столько
+
+ports:
+  - index: 1                         # {port} в узлах ПЛК
+    path: /tmp/ttySim23 #/dev/ttyUSB0
+    devices:
+      - {address: 1}
+      - {address: 2}
+      - {address: 3}
+      - {address: 4}
+      - {address: 5}
+      - {address: 6}
+      - {address: 7}
+      - {address: 8}
+      - {address: 9}
+      - {address: 10}
+  - index: 2
+    path: /tmp/ttySim24 #/dev/ttyUSB0
+    devices:
+      - {address: 1}
+      - {address: 2}
+      - {address: 3}
+      - {address: 4}
+      - {address: 5}
+      - {address: 6}
+      - {address: 7}
+      - {address: 8}
+      - {address: 9}
+      - {address: 10}
+#  - index: 2
+#     path: /dev/ttyUSB1
+#     devices:
+#       - {address: 1}
+      #- {address: 5, index: 2, status_poll_ms: 200}   # плата 5 → Manipulator[2]
