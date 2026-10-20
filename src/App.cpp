@@ -27,12 +27,12 @@ App::App(BridgeConfig config) : config_(std::move(config)), opc_(io_, config_.op
 
 int App::run() {
     spdlog::info("[BRIDGE] {} port(s), {} device(s), PLC {}", ports_.size(), devices_.size(), config_.opc.endpoint);
-    for (auto& device : devices_) device.start();   // сначала узлы cmdReady в подписку
+    for (auto& device : devices_) device.start();
     for (auto& port : ports_) port.start();
     for (auto& publisher : publishers_) publisher.start();
     for (auto& poller : pollers_) poller.start();
     if (heartbeat_) heartbeat_->start();
-    opc_.run();                                       // соединение: подписка сразу со всеми узлами
+    opc_.run();
 
     signals_.async_wait([this](boost::system::error_code ec, int signal) {
         if (ec) return;
@@ -52,7 +52,7 @@ void App::request_stop() {
 void App::stop() {
     if (stopping_) return;
     stopping_ = true;
-    // обратный порядок: сначала те, кто шлёт запросы, потом транспорты
+
     for (auto& poller : pollers_) poller.stop();
     for (auto& device : devices_) device.stop();
     if (heartbeat_) heartbeat_->stop();

@@ -22,23 +22,18 @@ struct OpcSettings {
     std::string username{};                     // пусто — анонимный вход
     std::string password{};
 
-    // Подписка. Время жизни = lifetime_count × publishing_interval: 600 × 50 мс = 30 с.
-    // Сервер может поправить значения под свои пределы.
     double publishing_interval_ms{50.0};
     uint32_t lifetime_count{600};
-    uint32_t max_keep_alive_count{20};          // keep-alive раз в 20 × 50 мс = 1 с
-    double sampling_interval_ms{-1.0};          // −1 — как publishing_interval
-    uint32_t queue_size{10};                    // чтобы быстрые true→false→true не терялись
+    uint32_t max_keep_alive_count{20};
+    double sampling_interval_ms{-1.0};
+    uint32_t queue_size{10};
 
-    std::chrono::milliseconds loop_interval{2};             // как часто вызывать runIterate
-    std::chrono::milliseconds slow_iterate_warning{5};      // runIterate дольше — пишем в журнал
+    std::chrono::milliseconds loop_interval{2};
+    std::chrono::milliseconds slow_iterate_warning{5};
     std::vector<std::chrono::milliseconds> reconnect_backoff{
         std::chrono::seconds(1), std::chrono::seconds(2), std::chrono::seconds(5), std::chrono::seconds(10)};
 };
 
-// OPC UA-клиент поверх io_context. Всё — в потоке, который крутит io_context:
-// методы вызывать только из него, колбэки тоже приходят в нём.
-// Объект должен жить, пока работает io_context.
 class OpcTransport {
 public:
     using DataChangeCallback = std::function<void(const opcua::Variant&)>;
@@ -59,15 +54,10 @@ public:
     void stop();
     bool session_active() const;
 
-    // За сколько сервер гарантированно заметит изменение значения: max(выборка, публикация),
-    // как он их выставил. Два изменения быстрее этого (true → false → true) он может не заметить.
     std::chrono::milliseconds change_detection_time() const;
 
-    // Узлы для подписки. Регистрировать до run(); после переподключения подписка
-    // создаётся заново, и сервер снова присылает текущие значения.
     void register_node(const opcua::NodeId& node_id, DataChangeCallback callback);
 
-    // Один запрос Read / Write на все узлы.
     void read_nodes(std::span<const opcua::NodeId> nodes, ReadDone done);
     void write_nodes(std::span<const opcua::NodeId> nodes, std::span<const opcua::Variant> values,
                      WriteDone done);
@@ -76,8 +66,6 @@ public:
     void read_node(const opcua::NodeId& node_id, std::function<void(std::optional<opcua::Variant>)> done);
     void write_node(const opcua::NodeId& node_id, const opcua::Variant& value, WriteDone done);
 
-    // Старые методы — чтобы текущий OpcSerialBridge собрался без правок.
-    // Колбэк, как и раньше, только при успехе; новый код пусть использует read_nodes / write_nodes.
     void read_from_node(const opcua::NodeId& node_id,
                         std::function<void(const opcua::NodeId&, opcua::Variant)> on_complete);
     void write_to_node(const opcua::NodeId& node_id, const opcua::Variant& value,
@@ -110,14 +98,11 @@ private:
     std::map<opcua::NodeId, DataChangeCallback> node_callbacks_;
     std::optional<opcua::IntegerId> subscription_id_;
     bool subscription_pending_{false};
-    uint64_t subscription_generation_{0};     // ответы на старые запросы подписки отбрасываем
+    uint64_t subscription_generation_{0};
     double revised_publishing_ms_{0};
     double revised_sampling_ms_{0};
 
-    // Отложенные обработчики (post, таймеры) проверяют его: объект мог быть уже удалён.
     std::shared_ptr<bool> alive_{std::make_shared<bool>(true)};
 
-    // Последним: уничтожается первым, пока остальные поля ещё живы —
-    // его колбэки при закрытии могут обратиться к ним.
     opcua::Client client_;
 };

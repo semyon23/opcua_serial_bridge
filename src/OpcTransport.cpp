@@ -12,8 +12,6 @@ std::string node_name(const opcua::NodeId& id) {
     return std::string(opcua::toString(id));
 }
 
-// Исключение из колбэка open62541pp ловит и перебрасывает из runIterate(),
-// а оттуда — из корутины цикла: процесс падает. Колбэки пользователя — только через это.
 template <typename Fn, typename... Args>
 void call_user(std::string_view where, const Fn& fn, Args&&... args) {
     if (!fn) return;
@@ -41,7 +39,7 @@ OpcTransport::OpcTransport(asio::io_context& ioc, const std::string& endpoint)
 
 OpcTransport::~OpcTransport() {
     stop();
-    *alive_ = false;          // колбэки, которые ещё придут при закрытии client_, ничего не делают
+    *alive_ = false;
 }
 
 void OpcTransport::configure_client() {
@@ -49,12 +47,9 @@ void OpcTransport::configure_client() {
     config.setTimeout(settings_.request_timeout_ms);
     config.setSecurityMode(settings_.security_mode);
     if (!settings_.username.empty()) {
-        // В режиме None пароль идёт открытым текстом — сервер может отказать (BadIdentityTokenRejected)
         config.setUserIdentityToken(opcua::UserNameIdentityToken(settings_.username, settings_.password));
     }
 
-    // Колбэки состояния приходят изнутри runIterate(); работу с клиентом откладываем
-    // до выхода из него через post, чтобы не вызывать службы рекурсивно.
     client_.onConnected([this] {
         spdlog::info("[{}] Connected to {}", name_, settings_.endpoint);
     });
@@ -68,9 +63,7 @@ void OpcTransport::configure_client() {
         spdlog::info("[{}] Session closed", name_);
         session_active_ = false;
     });
-    // Не повод переподключаться: срабатывает и при подключении, когда закрывается канал FindServers.
-    // Потерянное соединение open62541 восстанавливает сама внутри runIterate(), а если не смогла —
-    // runIterate() бросает исключение, и тогда переподключаемся мы (run_loop).
+
     client_.onDisconnected([this] {
         if (!*alive_) return;
         session_active_ = false;
@@ -81,7 +74,7 @@ void OpcTransport::configure_client() {
     });
 }
 
-// ------------------------------------------------------------------ соединение
+
 
 void OpcTransport::run() {
     if (keep_running_) return;
@@ -100,7 +93,7 @@ void OpcTransport::stop() {
     reconnect_timer_.cancel();
     subscription_timer_.cancel();
     try {
-        client_.disconnect();       // CloseSession: ждёт ответа не дольше request_timeout_ms
+        client_.disconnect();
     } catch (const std::exception& e) {
         spdlog::warn("[{}] Disconnect: {}", name_, e.what());
     }
@@ -140,9 +133,9 @@ void OpcTransport::on_connection_lost(std::string_view reason) {
     if (!keep_running_) return;
     session_active_ = false;
     subscription_pending_ = false;
-    ++subscription_generation_;          // ответы на запросы старой подписки больше не нужны
+    ++subscription_generation_;
     subscription_timer_.cancel();
-    if (reconnect_pending_) return;      // переподключение уже запланировано — не спамим журнал
+    if (reconnect_pending_) return;
     spdlog::warn("[{}] Connection lost: {}", name_, reason);
     schedule_reconnect();
 }
@@ -169,7 +162,7 @@ asio::awaitable<void> OpcTransport::run_loop() {
         } catch (const opcua::BadStatus& e) {
             on_connection_lost(e.what());
         } catch (const std::exception& e) {
-            // сюда попадают исключения из колбэков open62541pp — соединение тут ни при чём
+
             spdlog::error("[{}] runIterate: {}", name_, e.what());
         }
         const auto spent = std::chrono::steady_clock::now() - started;
